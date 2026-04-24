@@ -1,11 +1,7 @@
-import {
-    booleanIntersects,
-    booleanPointInPolygon,
-    lineString,
-    point,
-    polygon,
-} from '@turf/turf';
 import { create } from 'zustand';
+import { computeScores, computeFeatures } from '../lib/scoring';
+import { predictRisk } from '../lib/aiModel';
+import { findOptimalPath } from '../lib/astar';
 
 export type AppMode = 'SKETCH' | 'SIMULATE' | 'COMPARE';
 export type CursorTool = 'PENCIL' | 'SELECT' | 'ERASER' | 'PAN';
@@ -37,6 +33,10 @@ export interface RouteMetrics {
     etaSeconds: number;
     length: number;
     hasViolation: boolean;
+    /** ML-predicted collision risk, 0–1 (from TensorFlow.js edge AI model) */
+    collisionRisk: number;
+    /** TF.js inference time in milliseconds */
+    inferenceMs: number;
 }
 
 export interface SketchRoute {
@@ -132,126 +132,60 @@ const clamp = (value: number, min: number, max: number) =>
 
 const roundToSingle = (value: number) => Math.round(value * 10) / 10;
 
-const pathLength = (points: WorldPoint[]) =>
-    points.slice(1).reduce((acc, current, index) => {
-        const previous = points[index];
-        return acc + Math.hypot(current.x - previous.x, current.y - previous.y);
-    }, 0);
+// ---------------------------------------------------------------------------
+// NFZ violation check (circle-based, no external dependency needed)
+// ---------------------------------------------------------------------------
 
-const distancePointToSegment = (p: WorldPoint, a: WorldPoint, b: WorldPoint) => {
+const pointToSegmentDist = (p: WorldPoint, a: WorldPoint, b: WorldPoint): number => {
     const dx = b.x - a.x;
     const dy = b.y - a.y;
-    if (dx === 0 && dy === 0) {
-        return Math.hypot(p.x - a.x, p.y - a.y);
-    }
-
-    const t = clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy), 0, 1);
-    const projection = { x: a.x + t * dx, y: a.y + t * dy };
-    return Math.hypot(p.x - projection.x, p.y - projection.y);
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+    const t = clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq, 0, 1);
+    return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
 };
 
-const buildZonePolygon = (zone: NoFlyZone) => {
-    const ring: number[][] = [];
-    const pointCount = 28;
-    for (let index = 0; index <= pointCount; index += 1) {
-        const angle = (Math.PI * 2 * index) / pointCount;
-        ring.push([
-            zone.x + Math.cos(angle) * zone.radius,
-            zone.y + Math.sin(angle) * zone.radius,
-        ]);
-    }
-    return polygon([ring]);
+const hasNoFlyIntersection = (points: WorldPoint[], zones: NoFlyZone[]): boolean => {
+    if (points.length < 2) return false;
+    return zones.some((zone) =>
+        points.slice(1).some((current, index) =>
+            pointToSegmentDist(zone, points[index]!, current) < zone.radius
+        )
+    );
 };
 
-const hasNoFlyIntersection = (points: WorldPoint[], zones: NoFlyZone[]) => {
-    if (points.length < 2) {
-        return false;
-    }
-
-    return zones.some((zone) => {
-        const zonePolygon = buildZonePolygon(zone);
-        const pointViolation = points.some((routePoint) =>
-            booleanPointInPolygon(point([routePoint.x, routePoint.y]), zonePolygon)
-        );
-        if (pointViolation) {
-            return true;
-        }
-
-        return points.slice(1).some((current, index) => {
-            const previous = points[index];
-            const segment = lineString([
-                [previous.x, previous.y],
-                [current.x, current.y],
-            ]);
-            return booleanIntersects(segment, zonePolygon);
-        });
-    });
-};
-
-const turnPenalty = (points: WorldPoint[]) => {
-    if (points.length < 3) {
-        return 0;
-    }
-
-    return points.slice(2).reduce((penalty, current, index) => {
-        const previous = points[index + 1];
-        const beforePrevious = points[index];
-        const first = { x: previous.x - beforePrevious.x, y: previous.y - beforePrevious.y };
-        const second = { x: current.x - previous.x, y: current.y - previous.y };
-        const firstLength = Math.hypot(first.x, first.y);
-        const secondLength = Math.hypot(second.x, second.y);
-        if (firstLength === 0 || secondLength === 0) {
-            return penalty;
-        }
-
-        const cosine = clamp(
-            (first.x * second.x + first.y * second.y) / (firstLength * secondLength),
-            -1,
-            1
-        );
-        const angleDegrees = (Math.acos(cosine) * 180) / Math.PI;
-        return penalty + angleDegrees / 45;
-    }, 0);
-};
+// ---------------------------------------------------------------------------
+// ML-backed route metrics (uses scoring.ts + aiModel.ts)
+// ---------------------------------------------------------------------------
 
 const calculateRouteMetrics = (points: WorldPoint[], zones: NoFlyZone[]): RouteMetrics => {
-    const length = pathLength(points);
-    const direct = points.length > 1 ? Math.hypot(points.at(-1)!.x - points[0].x, points.at(-1)!.y - points[0].y) : 1;
-    const efficiencyRatio = direct === 0 ? 1 : length / direct;
+    // Compute scores using the ML-compatible scoring engine
+    const scores = computeScores(points, zones);
+    const features = computeFeatures(points, zones);
 
-    const minClearancePenalty = zones.reduce((penalty, zone) => {
-        const segmentClearance = points.slice(1).reduce((minDistance, current, index) => {
-            const previous = points[index];
-            const distance = distancePointToSegment(zone, previous, current) - zone.radius;
-            return Math.min(minDistance, distance);
-        }, Number.POSITIVE_INFINITY);
-
-        if (segmentClearance > 6) {
-            return penalty;
-        }
-
-        return penalty + clamp((6 - segmentClearance) * 2.2, 0, 14);
-    }, 0);
+    // Edge-AI inference via TensorFlow.js
+    let collisionRisk = 0;
+    let inferenceMs = 0;
+    try {
+        const aiResult = predictRisk(features);
+        collisionRisk = aiResult.risk;
+        inferenceMs = aiResult.inferenceMs;
+    } catch {
+        // TF.js may not be warm yet on first call; fall back gracefully
+    }
 
     const hasViolation = hasNoFlyIntersection(points, zones);
-    const efficiency = clamp(100 - (efficiencyRatio - 1) * 55, 38, 100);
-    const safetyBase = hasViolation ? 56 : 100;
-    const safety = clamp(safetyBase - minClearancePenalty, 30, 100);
-    const energy = clamp(100 - length * 0.72 - turnPenalty(points) * 0.85, 26, 100);
-    const flightScore = clamp(
-        Math.round(safety * 0.42 + efficiency * 0.34 + energy * 0.24),
-        0,
-        100
-    );
 
     return {
-        safety: roundToSingle(safety),
-        efficiency: roundToSingle(efficiency),
-        energy: roundToSingle(energy),
-        flightScore,
-        etaSeconds: Math.max(6, Math.round(length * 2.4)),
-        length: roundToSingle(length),
+        safety: roundToSingle(scores.safety),
+        efficiency: roundToSingle(scores.efficiency),
+        energy: roundToSingle(scores.energy),
+        flightScore: scores.flightScore,
+        etaSeconds: Math.max(6, Math.round(scores.pathLength * 2.4)),
+        length: roundToSingle(scores.pathLength),
         hasViolation,
+        collisionRisk,
+        inferenceMs,
     };
 };
 
@@ -296,18 +230,11 @@ const seedRoutePoints: WorldPoint[] = [
     { x: 45, y: 64 },
 ];
 
-const aiRoutePoints: WorldPoint[] = [
-    { x: 14, y: 69 },
-    { x: 18, y: 65 },
-    { x: 23, y: 59 },
-    { x: 27, y: 52 },
-    { x: 30, y: 45 },
-    { x: 33, y: 38 },
-    { x: 38, y: 34 },
-    { x: 43, y: 35 },
-    { x: 45, y: 43 },
-    { x: 45, y: 64 },
-];
+const aiRoutePoints: WorldPoint[] = findOptimalPath(
+    { x: 14, y: 69 }, // jayanagar (start)
+    { x: 45, y: 64 }, // city-hospital (end)
+    NO_FLY_ZONES,
+);
 
 const seededUserRoute: SketchRoute = {
     id: 'route-1',
