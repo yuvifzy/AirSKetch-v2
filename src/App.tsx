@@ -6,9 +6,15 @@ import TopBar from './components/TopBar';
 import ControlPanel from './components/ControlPanel';
 import LandingPage from './components/LandingPage';
 import { useAirSketchStore } from './store/useAirSketchStore';
+import { warmupModel } from './lib/aiModel';
 
 function SimulatorApp() {
   const { mode, simulation, tickSimulation } = useAirSketchStore();
+
+  useEffect(() => {
+    // Warm up the TensorFlow.js model on mount so first inference is fast
+    warmupModel().catch(console.warn);
+  }, []);
 
   useEffect(() => {
     if (mode !== 'SIMULATE' || !simulation.isPlaying) {
@@ -59,5 +65,3 @@ function App() {
     </BrowserRouter>
   );
 }
-
-export default App;
