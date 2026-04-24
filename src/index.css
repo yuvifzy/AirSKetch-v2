@@ -1,0 +1,41 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;700;800;900&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: 'Outfit', sans-serif;
+    @apply bg-brutal-bg text-black overflow-hidden;
+  }
+}
+
+@layer utilities {
+  .brutal-border {
+    @apply border-4 border-black;
+  }
+  
+  .glass-panel {
+    @apply bg-white border-4 border-black shadow-brutal;
+  }
+  
+  .glass-button {
+    @apply bg-white border-4 border-black shadow-brutal font-bold hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-[2px_2px_0_0_#000] active:translate-x-[4px] active:translate-y-[4px] active:shadow-none transition-all duration-75;
+  }
+
+  .canvas-grid {
+    background-color: #efece5;
+    background-image: 
+      linear-gradient(rgba(0, 0, 0, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 0, 0, 0.05) 1px, transparent 1px);
+    background-size: 40px 40px;
+    background-position: center center;
+  }
+
+  .canvas-dots {
+    background-image: radial-gradient(rgba(0, 0, 0, 0.15) 1px, transparent 1px);
+    background-size: 20px 20px;
+    background-color: #efece5;
+  }
+}
