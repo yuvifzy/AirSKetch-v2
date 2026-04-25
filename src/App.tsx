@@ -41,12 +41,9 @@ function SimulatorApp() {
 
       {/* HUD UI Layer */}
       <div className="absolute inset-0 z-20 pointer-events-none">
-        {/* Child elements must have pointer-events-auto if they are interactive */}
-        <div className="pointer-events-auto w-full h-full">
-          <TopBar />
-          <Sidebar />
-          <ControlPanel />
-        </div>
+        <TopBar />
+        <Sidebar />
+        <ControlPanel />
       </div>
 
       {/* Vignette removed for brutalist design */}
@@ -65,3 +62,5 @@ function App() {
     </BrowserRouter>
   );
 }
+
+export default App;
