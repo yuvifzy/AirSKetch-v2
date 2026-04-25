@@ -1,4 +1,4 @@
-import { Gauge, Shield, Zap, Clock3, Cpu, Trash2 } from 'lucide-react';
+import { Gauge, Shield, Zap, Clock3, Cpu, Trash2, AlertTriangle } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { cn } from '../utils/cn';
 import { useAirSketchStore } from '../store/useAirSketchStore';
@@ -97,6 +97,30 @@ export default function Sidebar() {
         />
       </section>
 
+      {selectedRoute && (
+        <section className="bg-white brutal-border shadow-brutal rounded-xl px-3 py-2.5">
+          <div className="flex items-center gap-1.5 text-[10px] font-black tracking-wide uppercase text-[#ef4444]">
+            <AlertTriangle className="w-3 h-3" />
+            AI COLLISION RISK
+          </div>
+          <div className="mt-1 flex items-end gap-1">
+            <span className="text-3xl font-black leading-none">
+              {Math.round((selectedRoute.metrics.collisionRisk ?? 0) * 100)}
+            </span>
+            <span className="text-xs font-bold opacity-70">%</span>
+          </div>
+          <div className="mt-2 h-3 bg-gray-100 brutal-border border-[2px] relative overflow-hidden">
+            <div
+              className="absolute left-0 top-0 bottom-0 bg-[#ef4444]"
+              style={{ width: `${Math.min(100, Math.max(0, (selectedRoute.metrics.collisionRisk ?? 0) * 100))}%` }}
+            />
+          </div>
+          <div className="mt-1 text-[9px] opacity-50 font-mono">
+            TF.js · {(selectedRoute.metrics.inferenceMs ?? 0).toFixed(2)}ms · On-Device
+          </div>
+        </section>
+      )}
+
       <section className="bg-[#efefef] brutal-border shadow-brutal rounded-xl px-3 py-2">
         <div className="text-xs font-black uppercase tracking-wide">ROUTES</div>
         <div className="mt-2 border-t-[3px] border-black/90 pt-2 space-y-1.5">
@@ -166,4 +190,4 @@ export default function Sidebar() {
       </section>
     </motion.aside>
   );
-}
+} 
