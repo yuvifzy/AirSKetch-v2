@@ -1,168 +1,100 @@
-/**
- * astar.ts – A* pathfinding for AirSketch v2.
- *
- * Adapted from Drone-Traffic-Sim.  Key differences:
- *  - World coordinates are 0–100 (percent), not pixels.
- *  - Obstacles are circular no-fly zones, not building rectangles.
- *  - Grid is 40×40 over the 100×100 world space.
- */
+import * as tf from '@tensorflow/tfjs';
+import type { ScoringFeatures } from './scoring';
 
-import type { NoFlyZone, WorldPoint } from '../store/useAirSketchStore';
+let model: tf.Sequential | null = null;
+let warmedUp = false;
 
-const COLS = 40;
-const ROWS = 40;
-const CELL_W = 100 / COLS;  // 2.5 world-units
-const CELL_H = 100 / ROWS;  // 2.5 world-units
+const ensureBackend = async (): Promise<void> => {
+  try {
+    await tf.setBackend('webgl');
+    await tf.ready();
+  } catch {
+    await tf.setBackend('cpu');
+    await tf.ready();
+  }
+  if (tf.getBackend() !== 'webgl' && tf.getBackend() !== 'cpu') {
+    await tf.setBackend('cpu');
+    await tf.ready();
+  }
+};
 
-// ---------------------------------------------------------------------------
-// Grid construction – blocked cell = inside an NFZ (with margin)
-// ---------------------------------------------------------------------------
+export const initModel = (): tf.Sequential => {
+  if (model) return model;
 
-const buildGrid = (zones: NoFlyZone[]): boolean[][] => {
-  const grid: boolean[][] = Array.from({ length: ROWS }, () =>
-    Array(COLS).fill(false),
+  const m = tf.sequential();
+  m.add(
+    tf.layers.dense({
+      units: 6,
+      inputShape: [4],
+      activation: 'relu',
+      useBias: true,
+    }),
   );
-  const margin = 1.5; // extra world-unit clearance around each NFZ
+  m.add(
+    tf.layers.dense({
+      units: 1,
+      activation: 'sigmoid',
+      useBias: true,
+    }),
+  );
 
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      const cx = c * CELL_W + CELL_W / 2;
-      const cy = r * CELL_H + CELL_H / 2;
-      grid[r]![c] = zones.some(
-        (z) => Math.hypot(cx - z.x, cy - z.y) < z.radius + margin,
-      );
-    }
-  }
-  return grid;
+  // Hand-tuned weights so output behaves sensibly without training.
+  // Inputs: [normalizedLength, nfzCount, sharpTurnCount, buildingProximity]
+  const w1 = tf.tensor2d(
+    [
+      [0.6, -0.2, 0.4, 0.1, 0.3, 0.2],
+      [1.8,  0.1, 1.5, 0.0, 1.2, 1.0],
+      [0.4, -0.1, 0.3, 0.2, 0.2, 0.5],
+      [1.2,  0.2, 1.0, 0.1, 0.9, 0.7],
+    ],
+    [4, 6],
+  );
+  const b1 = tf.tensor1d([-0.5, 0.0, -0.3, 0.0, -0.2, -0.1]);
+  const w2 = tf.tensor2d([[1.4], [-0.1], [1.2], [0.2], [1.0], [0.8]], [6, 1]);
+  const b2 = tf.tensor1d([-2.0]);
+
+  m.layers[0]!.setWeights([w1, b1]);
+  m.layers[1]!.setWeights([w2, b2]);
+
+  model = m;
+  return m;
 };
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-const cellOf = (p: WorldPoint): { r: number; c: number } => ({
-  r: Math.max(0, Math.min(ROWS - 1, Math.floor(p.y / CELL_H))),
-  c: Math.max(0, Math.min(COLS - 1, Math.floor(p.x / CELL_W))),
-});
-
-const cellCenter = (r: number, c: number): WorldPoint => ({
-  x: c * CELL_W + CELL_W / 2,
-  y: r * CELL_H + CELL_H / 2,
-});
-
-const heuristic = (r: number, c: number, gr: number, gc: number): number =>
-  Math.sqrt((r - gr) ** 2 + (c - gc) ** 2);
-
-// ---------------------------------------------------------------------------
-// A* search
-// ---------------------------------------------------------------------------
-
-type Node = { r: number; c: number; g: number; f: number; parent: Node | null };
-
-export const findOptimalPath = (
-  start: WorldPoint,
-  end: WorldPoint,
-  zones: NoFlyZone[],
-): WorldPoint[] => {
-  const grid = buildGrid(zones);
-  const startCell = cellOf(start);
-  const goalCell = cellOf(end);
-
-  // Ensure start/goal cells are always passable
-  grid[startCell.r]![startCell.c] = false;
-  grid[goalCell.r]![goalCell.c] = false;
-
-  const open: Node[] = [];
-  const visited = new Set<string>();
-
-  open.push({
-    r: startCell.r,
-    c: startCell.c,
-    g: 0,
-    f: heuristic(startCell.r, startCell.c, goalCell.r, goalCell.c),
-    parent: null,
-  });
-
-  const directions = [
-    [-1, 0], [1, 0], [0, -1], [0, 1],
-    [-1, -1], [-1, 1], [1, -1], [1, 1],
-  ] as const;
-
-  while (open.length > 0) {
-    open.sort((a, b) => a.f - b.f);
-    const current = open.shift()!;
-    const key = `${current.r},${current.c}`;
-    if (visited.has(key)) continue;
-    visited.add(key);
-
-    if (current.r === goalCell.r && current.c === goalCell.c) {
-      // Reconstruct path
-      const cells: WorldPoint[] = [];
-      let n: Node | null = current;
-      while (n) {
-        cells.push(cellCenter(n.r, n.c));
-        n = n.parent;
-      }
-      cells.reverse();
-      const path: WorldPoint[] = [
-        { ...start },
-        ...cells.slice(1, -1),
-        { ...end },
-      ];
-      return smoothPath(path, grid);
-    }
-
-    for (const [dr, dc] of directions) {
-      const nr = current.r + dr;
-      const nc = current.c + dc;
-      if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
-      if (grid[nr]![nc]) continue;
-      const nkey = `${nr},${nc}`;
-      if (visited.has(nkey)) continue;
-      const stepCost = dr !== 0 && dc !== 0 ? Math.SQRT2 : 1;
-      const g = current.g + stepCost;
-      const f = g + heuristic(nr, nc, goalCell.r, goalCell.c);
-      open.push({ r: nr, c: nc, g, f, parent: current });
-    }
-  }
-
-  // Fallback: straight line
-  return [{ ...start }, { ...end }];
+export const warmupModel = async (): Promise<void> => {
+  if (warmedUp) return;
+  await ensureBackend();
+  const m = initModel();
+  const dummy = tf.tensor2d([[1, 0, 0, 0]]);
+  const out = m.predict(dummy) as tf.Tensor;
+  await out.data();
+  dummy.dispose();
+  out.dispose();
+  warmedUp = true;
 };
 
-// ---------------------------------------------------------------------------
-// Path smoothing (string-pulling)
-// ---------------------------------------------------------------------------
-
-const lineClear = (
-  a: WorldPoint,
-  b: WorldPoint,
-  grid: boolean[][],
-): boolean => {
-  const steps = Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / (CELL_W / 2));
-  for (let i = 1; i < steps; i++) {
-    const t = i / steps;
-    const x = a.x + (b.x - a.x) * t;
-    const y = a.y + (b.y - a.y) * t;
-    const r = Math.floor(y / CELL_H);
-    const c = Math.floor(x / CELL_W);
-    if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return false;
-    if (grid[r]![c]) return false;
-  }
-  return true;
+export type AIResult = {
+  risk: number;
+  inferenceMs: number;
 };
 
-const smoothPath = (path: WorldPoint[], grid: boolean[][]): WorldPoint[] => {
-  if (path.length <= 2) return path;
-  const smoothed: WorldPoint[] = [path[0]!];
-  let i = 0;
-  while (i < path.length - 1) {
-    let j = path.length - 1;
-    while (j > i + 1 && !lineClear(path[i]!, path[j]!, grid)) {
-      j--;
-    }
-    smoothed.push(path[j]!);
-    i = j;
-  }
-  return smoothed;
+export const predictRisk = (features: ScoringFeatures): AIResult => {
+  const m = initModel();
+  const input = tf.tensor2d([
+    [
+      Math.min(features.normalizedLength, 5),
+      features.nfzCount,
+      Math.min(features.sharpTurnCount, 20),
+      features.buildingProximityScore,
+    ],
+  ]);
+  const start = performance.now();
+  const out = m.predict(input) as tf.Tensor;
+  const data = out.dataSync();
+  const inferenceMs = performance.now() - start;
+  input.dispose();
+  out.dispose();
+  return {
+    risk: Math.max(0, Math.min(1, data[0]!)),
+    inferenceMs,
+  };
 };
